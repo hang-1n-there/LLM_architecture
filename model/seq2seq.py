@@ -99,3 +99,19 @@ class Decoder(nn.Module):
         y, h = self.rnn(x, h_t_1)
 
         return y,h
+
+class Generater(nn.Module):
+    
+    def __init__(self, hidden_size, output_size):
+
+        self.linear = nn.Linear(hidden_size, output_size)
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        # |x| = (bs, length, hs)
+        # train : length, inference : 1
+        # |y| = (bs, length, hs)
+        y = self.softmax(self.linear(x))
+
+        return y
