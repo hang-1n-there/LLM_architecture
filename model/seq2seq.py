@@ -67,3 +67,35 @@ class Encoder(nn.Module):
             y, _ = unpack(y, batch_first=True)
 
         return y, h
+
+class Decoder(nn.Module):
+    
+    def __init__(self, word_vec_size, hidden_size, n_layers=4, droupout_p=.2):
+        super(Decoder, self).__init__()
+
+        self.rnn = nn.LSTM(
+            word_vec_size+hidden_size,
+            hidden_size,
+            num_layers=n_layers,
+            dropout=droupout_p,
+            bidirectional=False,
+            batch_first=True,
+        )
+    
+    def forward(self, emb_t, h_t_1_tilde, h_t_1):
+        # |emb_t| : 현재 시점의 embedding vector / (bs, 1, ws)
+        # |h_t_1_tilde| : 이전 시점의 출력값 / (bs, 1, hs)
+        # |h_t_1[0]| : 이전 시점의 hidden state / (n_layers, bs, hs)
+
+        batch_size = emb_t.size(0)
+        hidden_size = h_t_1[0].size(-1)
+
+        if h_t_1_tilde is None:
+            h_t_1_tilde = emb_t.new(batch_size, 1, hidden_size).zero_()
+        
+        # input feeding
+        x = torch.cat([h_t_1_tilde, emb_t], dim=-1)
+
+        y, h = self.rnn(x, h_t_1)
+
+        return y,h
