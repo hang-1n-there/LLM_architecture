@@ -100,7 +100,7 @@ class Decoder(nn.Module):
 
         return y,h
 
-class Generater(nn.Module):
+class Generator(nn.Module):
     
     def __init__(self, hidden_size, output_size):
 
@@ -115,3 +115,121 @@ class Generater(nn.Module):
         y = self.softmax(self.linear(x))
 
         return y
+    
+class Seq2Seq(nn.Module):
+
+    # input_size = src voc size
+    # output_size = tgt voc size
+    # word_vec_size = word embedding size
+
+    def __init__(
+        self,
+        input_size,
+        word_vec_size,
+        hidden_size,
+        output_size,
+        n_layers=4,
+        dropout_p=.2
+    ):
+        self.input_size = input_size
+        self.word_vec_size = word_vec_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.dropout_p = dropout_p
+
+        super(Seq2Seq, self).__init__()
+
+        self.emb_src = nn.Embedding(input_size,word_vec_size)
+        self.emb_dec = nn.Embedding(output_size, word_vec_size)
+
+        self.encoder = Encoder(
+            word_vec_size, hidden_size,
+            n_layers=n_layers, dropout_p=dropout_p,
+        )
+        self.decoder = Decoder(
+            word_vec_size, hidden_size,
+            n_layers=n_layers, droupout_p=dropout_p,
+        )
+        self.attn = Attention(hidden_size)
+
+        # after teacher forcing
+        self.concat = nn.Linear(hidden_size*2, hidden_size)
+        self.tanh = nn.Tanh()
+        self.generator = Generator()
+    
+    def generate_mask(self, x, length):
+        mask = []
+
+        max_length = max(length)
+        for lengx in length:
+            if max_length - lengx > 0 :
+                mask += [torch.cat(x.new_ones(1, lengx).zero_(), 
+                                x.new_ones(1, max_length-1))]
+            else:
+                mask += [x.new_ones(1, lengx).zero_()]
+        
+        mask = torch.cat(mask, dim=0).bool()
+
+        return mask
+    
+    def fast_merge_encoder_hiddens(self, encoder_hiddens):
+        h_0_tgt, c_0_tgt = encoder_hiddens
+        batch_size = h_0_tgt.size(1)
+
+        # (layers*2 * bs * hs/2) to (layers * bs * hs)
+        h_0_tgt = h_0_tgt.transpose(0, 1).contiguous().view(batch_size, -1, self.hidden_size)
+        c_0_tgt = c_0_tgt.transpose(0, 1).contiguous().view(batch_size, -1, self.hidden_size)
+
+        return h_0_tgt, c_0_tgt
+    
+    def forward(self, src, tgt):
+        batch_size = tgt.size(0)
+
+        mask = None
+        x_length = None
+
+        #패딩되지 않은 부분의 길이
+        if isinstance(src, tuple):
+            x, x_length = src
+            
+            mask = self.generate_mask(x, x_length)
+
+        else:
+            x = src
+
+        if isinstance(tgt, tuple):
+            tgt = tgt[0]
+        
+        emb_src = self.emb_src(x)
+        
+        # y, h
+        h_src, h_0_tgt = self.encoder(emb_src, x_length)
+
+        h_0_tgt = self.fast_merge_encoder_hiddens(h_0_tgt)
+        emb_tgt = self.emb_dec(tgt)
+
+        h_tilde = []
+
+        h_t_tilde = None
+        decoder_hidden = h_0_tgt
+
+        for t in range(tgt.size(1)):
+            
+            emb_t = emb_tgt[:,t,:].unsqueeze(1)
+
+            decoder_output, decoder_hidden = self.decoder(emb_t,h_t_tilde, decoder_hidden)
+
+            # 인코더의 전체 hs, 
+            context_vector = self.attn(h_src, decoder_output, mask)
+
+            h_t_tilde = self.tanh(self.concat(torch.cat(decoder_output, context_vector), dim=-1))
+
+            h_tilde += h_t_tilde
+        
+        h_tilde = torch.cat(h_tilde, dim=1)
+
+        y_hat = self.generator(h_tilde)
+
+        return y_hat
+    
