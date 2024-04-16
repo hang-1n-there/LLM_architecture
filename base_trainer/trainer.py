@@ -68,3 +68,30 @@ class MLE_Engine(Engine):
             
             else:
                 backward_target.backward()
+        
+        word_count = int(mini_batch.tgt[1].sum())
+        p_norm = float(get_parameter_norm(engine.model.parameters()))
+        g_norm = float(get_grad_norm(engine.model.parameters()))
+
+        if engine.state.iteration % engine.config.iteration_per_update == 0 and \
+        engine.state.iteration > 0:
+            torch_utils.clip_grad_norm(
+                engine.model.parameters(),
+                engine.config.max_grad_norm,
+            )
+
+            if engine.config.gpu_id >=0 and not engine.config.off_autocast:
+                engine.scaler.step(engine.optimizer)
+                engine.scaler.update()
+            else:
+                engine.optimizer.step()
+        
+        loss = float(loss / word_count)
+        ppl = np.exp(loss)
+
+        return {
+            'loss' : loss,
+            'ppl' : ppl,
+            '|param|' : p_norm if not np.isnan(p_norm) and not np.isinf(p_norm) else 0.,
+            '|g_param|' : g_norm if not np.isnan(g_norm) and not np.isinf(g_norm) else 0.,
+        }
