@@ -35,7 +35,7 @@ class MLE_Engine(Engine):
     def train(engine, mini_batch):
         engine.model.train()
 
-        # gradient accumulation or only 1 
+        # gradient accumulation or only 1, but first iteration is not amp 
         if engine.state.iteration % engine.config.iteration_per_update == 1 or \
         engine.config.iteration_per_update == 1:
             
@@ -95,3 +95,30 @@ class MLE_Engine(Engine):
             '|param|' : p_norm if not np.isnan(p_norm) and not np.isinf(p_norm) else 0.,
             '|g_param|' : g_norm if not np.isnan(g_norm) and not np.isinf(g_norm) else 0.,
         }
+    
+    @staticmethod
+    def validate(engine, mini_batch):
+        with torch.no_grad:
+            device = next(engine.model.parameters()).device
+            mini_batch.src = (mini_batch.src[0].to(device), mini_batch.src[1])
+            mini_batch.tgt = (mini_batch.tgt[0].to(device), mini_batch.tgt[1])
+
+            x, y = mini_batch.src, mini_batch.tgt[0][:,1:]
+
+            with autocast(not engine.config.off_autocast):
+                y_hat = engine.model(x, mini_batch.tgt[0][:,:-1])
+
+                loss = engine.crit(
+                    y_hat.contiguous().view(-1, y_hat.size(-1)),
+                    y.contiguous().view(-1)
+                )
+        
+        word_count = int(mini_batch.tgt[1].sum())
+        loss = float(loss / word_count)
+        ppl = np.exp(loss)
+
+        return {
+            'loss' : loss,
+            'ppl' : ppl
+        }
+        
