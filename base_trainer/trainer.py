@@ -14,7 +14,7 @@ from base_trainer import get_grad_norm, get_parameter_norm
 
 VERBOSE_SILENT = 0
 VERBOSE_EPOCH_WISE = 1
-VERBOSE_EPOCH_WISE = 2
+VERBOSE_BATCH_WISE = 2
 
 # maximum likelihood estimation
 class MLE_Engine(Engine):
@@ -121,4 +121,59 @@ class MLE_Engine(Engine):
             'loss' : loss,
             'ppl' : ppl
         }
+    
+    @staticmethod
+    def attach(
+        train_engine, validation_enigne,
+        training_metric_names = ['loss', 'ppl','|param|','|g_param|'],
+        validation_metric_names = ['loss', 'ppl'],
+        verbose=VERBOSE_BATCH_WISE
+    ):
         
+        # 메트릭의 평균을 엔진에 첨부
+        def attach_running_average(engine, metric_name):
+            RunningAverage(output_transform=lambda x: x[metric_name]).attach(
+                engine,
+                metric_name,
+            )
+        
+        for metirc_name in training_metric_names:
+            attach_running_average(train_engine, metirc_name)
+        
+        if verbose >= VERBOSE_BATCH_WISE:
+            pbar = ProgressBar(bar_format=None, ncols=120)
+            pbar.attach(train_engine, training_metric_names)
+        
+        if verbose >= VERBOSE_EPOCH_WISE:
+            @train_engine.on(Events.EPOCH_COMPLETED)
+            def print_train_logs(engine):
+                avg_p_norm = engine.state.metrics['|param|']
+                avg_g_norm = engine.state.metrics['|g_param|']
+                avg_loss = engine.state.metrics['loss']
+
+                print('Epoch {} - |param|={:.2e} |g_param|={:.2e} loss={:.4e} ppl={:.2f}'.format(
+                    engine.state.epoch,
+                    avg_p_norm,
+                    avg_g_norm,
+                    np.exp(avg_loss),
+                ))
+        
+        for metric_name in validation_metric_names:
+            attach_running_average(validation_enigne,validation_metric_names)
+        
+        if verbose >= VERBOSE_BATCH_WISE:
+            pbar = ProgressBar(bar_format=None, ncols=120)
+            pbar.attach(validation_enigne,validation_metric_names)
+        
+        if verbose >= VERBOSE_EPOCH_WISE:
+            @validation_enigne.on(Events.EPOCH_COMPLETED)
+            def print_valid_logs(engine):
+                avg_loss = engine.state.metrics['loss']
+
+                print('Validation - loss={:.4e} ppl={:.2f} best_loss={:.4e} best_ppl={:.2f}'.format(
+                    avg_loss,
+                    np.exp(avg_loss),
+                    engine.best_loss,
+                    np.exp(engine.best_loss),
+                ))
+    
