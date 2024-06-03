@@ -131,6 +131,7 @@ class MLE_Engine(Engine):
     ):
         
         # 메트릭의 평균을 엔진에 첨부
+        # 모델의 파라미터나 손실 폭을 줄여주기도 함.
         def attach_running_average(engine, metric_name):
             RunningAverage(output_transform=lambda x: x[metric_name]).attach(
                 engine,
@@ -159,7 +160,7 @@ class MLE_Engine(Engine):
                 ))
         
         for metric_name in validation_metric_names:
-            attach_running_average(validation_enigne,validation_metric_names)
+            attach_running_average(validation_enigne,metric_name)
         
         if verbose >= VERBOSE_BATCH_WISE:
             pbar = ProgressBar(bar_format=None, ncols=120)
@@ -176,4 +177,115 @@ class MLE_Engine(Engine):
                     engine.best_loss,
                     np.exp(engine.best_loss),
                 ))
+    
+    # 학습이 멈춘 epoch 계산
+    @staticmethod
+    def resume_training(engine, resume_epoch):
+        engine.state.iteration = (resume_epoch-1) * len(engine.state.dataloader)
+        engine.state.epoch = resume_epoch - 1
+
+    @staticmethod
+    def check_best(engine):
+        loss = float(engine.state.metrics['loss'])
+        if loss <= engine.best_loss:
+            engine.best_loss = loss
+    
+    @staticmethod
+    def save_model(engine, train_engine, config, src_vocab, tgt_vocab):
+        avg_train_loss = train_engine.state.metrics['loss']
+        avg_valid_loss = engine.state.metrics['loss']
+
+        # Set a filename for last epoch
+        model_fn = config.model_fn.split('.')
+
+        model_fn = model_fn[:-1] + ['%02d' % train_engine.state.epoch,
+                                    '%.2f-%.2f' % (avg_train_loss,
+                                                   np.exp(avg_train_loss)
+                                                   ),
+                                    '%.2f-%.2f' % (avg_valid_loss,
+                                                   np.exp(avg_valid_loss)
+                                                   )
+                                    ] + model_fn[[-1]]
+        model_fn = '.'.join(model_fn)
+
+        torch.save(
+            {
+                'model': engine.model.state_dict(),
+                'opt': train_engine.optimizer.state_dict(),
+                'config': config,
+                'src_vocab': src_vocab,
+                'tgt_vocab': tgt_vocab,
+            }, model_fn
+        )
+
+class SingleTrainer():
+    
+    def __init__(self, target_engine_clcass, config):
+        self.target_engine_class = target_engine_clcass
+        config = config
+    
+    def train(self, model, crit, optimizer, train_loader, 
+              valid_loader, src_vocab, tgt_vocab, n_epochs,
+              lr_scheduler=None
+    ):
+        train_engine = self.target_engine_class(
+            self.target_engine_class.train,
+            model,
+            crit,
+            optimizer,
+            lr_scheduler,
+            self.config
+        )
+        validation_engine = self.target_engine_class(
+            self.target_engine_class.validate,
+            model,
+            crit,
+            optimizer,
+            lr_scheduler,
+            self.config
+        )
+
+        self.target_engine_class.attach(
+            train_engine,
+            validation_engine,
+            verbose=self.config.verbose
+        )
+
+        # train 1 epoch이 끝나면 valid 시작
+        def run_validation(engine,validation_engine,valid_loader):
+            validation_engine.run(valid_loader,max_epochs=1)
+
+            if engine.lr_scheduler is not None:
+                engine.lr_scheduler.step()
+        
+        train_engine.add_envent_handler(
+            Events.EPOCH_COMPLETED,
+            run_validation,
+            validation_engine,
+            valid_loader
+        )
+
+        # 학습이 처음 시작했을 때
+        train_engine.add_event_handler(
+            Events.STARTED,
+            self.target_engine_class.resume_training,
+            self.config.init_epoch,
+        )
+
+        validation_engine.add_envent_handler(
+            Events.EPOCH_COMPLETED, self.target_engine_class.check_best
+        )
+
+        validation_engine.add_event_handler(
+            Events.EPOCH_COMPLETED,
+            self.target_engine_class.save_model,
+            train_engine,
+            self.config,
+            src_vocab,
+            tgt_vocab,
+        )
+
+        train_engine.run(train_loader, max_epochs=n_epochs)
+
+        return model
     
