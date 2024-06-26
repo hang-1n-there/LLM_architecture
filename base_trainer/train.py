@@ -7,28 +7,28 @@ import torch.nn as nn
 
 import torch_optimizer as custom_optim
 
-from simple_nmt.data_loader import DataLoader
-import simple_nmt.data_loader as data_loader
+from base_trainer.data_loader import DataLoader
+import base_trainer.data_loader as data_loader
 
-from simple_nmt.models.seq2seq import Seq2Seq
-from simple_nmt.models.transformer import Transformer
-from simple_nmt.models.rnnlm import LanguageModel
+from base_trainer.model.seq2seq import Seq2Seq
+from base_trainer.model.transformer import Transformer
+from base_trainer.model.rnnlm import LanguageModel
 
-from simple_nmt.trainer import SingleTrainer
-from simple_nmt.rl_trainer import MinimumRiskTrainingEngine
-from simple_nmt.trainer import MaximumLikelihoodEstimationEngine
+from base_trainer.trainer import SingleTrainer
+from base_trainer.rl_trainer import MinimumRiskTrainingEngine
+from base_trainer.trainer import MLE_Engine
 
 
-def define_argparser(is_continue=False):
+def define_argparse(is_continue=False):
     p = argparse.ArgumentParser()
 
     if is_continue:
         p.add_argument(
             '--load_fn',
             required=True,
-            help='Model file name to continue.'
+            help = 'Model file name to continue'
         )
-
+    
     p.add_argument(
         '--model_fn',
         required=not is_continue,
@@ -86,7 +86,6 @@ def define_argparser(is_continue=False):
         default=1,
         help='Set initial epoch number, which can be useful in continue training. Default=%(default)s'
     )
-
     p.add_argument(
         '--max_length',
         type=int,
@@ -209,64 +208,54 @@ def define_argparser(is_continue=False):
         default=8,
         help='Number of heads in multi-head attention in Transformer. Default=%(default)s',
     )
-
-    config = p.parse_args()
-
-    return config
-
-
-def get_model(input_size, output_size, config):
+def get_model(input_size, output_size, config):    
     if config.use_transformer:
         model = Transformer(
-            input_size,                     # Source vocabulary size
-            config.hidden_size,             # Transformer doesn't need word_vec_size.
-            output_size,                    # Target vocabulary size
-            n_splits=config.n_splits,       # Number of head in Multi-head Attention.
-            n_enc_blocks=config.n_layers,   # Number of encoder blocks
-            n_dec_blocks=config.n_layers,   # Number of decoder blocks
-            dropout_p=config.dropout,       # Dropout rate on each block
+            input_size,
+            config.hidden_size,
+            output_size,
+            n_splits=config.n_splits,
+            n_enc_blocks=config.n_layers,
+            n_dec_blocks=config.n_layers,
+            dropout_p=config.dropout,
         )
     else:
         model = Seq2Seq(
             input_size,
-            config.word_vec_size,           # Word embedding vector size
-            config.hidden_size,             # LSTM's hidden vector size
+            config.word_vec_size,
+            config.hidden_size,
             output_size,
-            n_layers=config.n_layers,       # number of layers in LSTM
-            dropout_p=config.dropout        # dropout-rate in LSTM
+            n_layers=config.n_layers,
+            dropout_p=config.dropout
         )
-
+    
     return model
 
-
 def get_crit(output_size, pad_index):
-    # Default weight for loss equals to 1, but we don't need to get loss for PAD token.
-    # Thus, set a weight for PAD to zero.
     loss_weight = torch.ones(output_size)
     loss_weight[pad_index] = 0.
-    # Instead of using Cross-Entropy loss,
-    # we can use Negative Log-Likelihood(NLL) loss with log-probability.
+
     crit = nn.NLLLoss(
         weight=loss_weight,
         reduction='sum'
     )
-
+    
     return crit
-
 
 def get_optimizer(model, config):
     if config.use_adam:
         if config.use_transformer:
             optimizer = optim.Adam(model.parameters(), lr=config.lr, betas=(.9, .98))
-        else: # case of rnn based seq2seq.
+
+        else:
             optimizer = optim.Adam(model.parameters(), lr=config.lr)
     elif config.use_radam:
-        optimizer = custom_optim.RAdam(model.parameters(), lr=config.lr)
+        optimizer = optim.RAdam(model.parameters(), lr=config.lr)
+    
     else:
         optimizer = optim.SGD(model.parameters(), lr=config.lr)
-
+    
     return optimizer
-
 
 def get_scheduler(optimizer, config):
     if config.lr_step > 0:
@@ -278,13 +267,12 @@ def get_scheduler(optimizer, config):
                 config.lr_step
             )],
             gamma=config.lr_gamma,
-            last_epoch=config.init_epoch - 1 if config.init_epoch > 1 else -1,
+            last_epoch= config.init_epoch - 1 if config.init_epoch > 1 else -1,
         )
     else:
         lr_scheduler = None
-
+    
     return lr_scheduler
-
 
 def main(config, model_weight=None, opt_weight=None):
     def print_config(config):
@@ -293,41 +281,38 @@ def main(config, model_weight=None, opt_weight=None):
     print_config(config)
 
     loader = DataLoader(
-        config.train,                           # Train file name except extention, which is language.
-        config.valid,                           # Validation file name except extension.
-        (config.lang[:2], config.lang[-2:]),    # Source and target language.
+        config.train,
+        config.valid,
+        (config.lang[:2], config.lang[-2:]),
         batch_size=config.batch_size,
-        device=-1,                              # Lazy loading
-        max_length=config.max_length,           # Loger sequence will be excluded.
-        dsl=False,                              # Turn-off Dual-supervised Learning mode.
+        device=config.device,
+        max_length=config.max_length,
+        dsl=False,
     )
-
     input_size, output_size = len(loader.src.vocab), len(loader.tgt.vocab)
     model = get_model(input_size, output_size, config)
     crit = get_crit(output_size, data_loader.PAD)
 
     if model_weight is not None:
         model.load_state_dict(model_weight)
-
-    # Pass models to GPU device if it is necessary.
+    
     if config.gpu_id >= 0:
         model.cuda(config.gpu_id)
         crit.cuda(config.gpu_id)
-
+    
     optimizer = get_optimizer(model, config)
 
     if opt_weight is not None and (config.use_adam or config.use_radam):
         optimizer.load_state_dict(opt_weight)
-
+    
     lr_scheduler = get_scheduler(optimizer, config)
 
-    if config.verbose >= 2:
+    if config.verbose >=2:
         print(model)
         print(crit)
         print(optimizer)
-
-    # Start training. This function maybe equivalant to 'fit' function in Keras.
-    mle_trainer = SingleTrainer(MaximumLikelihoodEstimationEngine, config)
+    
+    mle_trainer = SingleTrainer(MLE_Engine, config)
     mle_trainer.train(
         model,
         crit,
@@ -340,22 +325,6 @@ def main(config, model_weight=None, opt_weight=None):
         lr_scheduler=lr_scheduler,
     )
 
-    if config.rl_n_epochs > 0:
-        optimizer = optim.SGD(model.parameters(), lr=config.rl_lr)
-        mrt_trainer = SingleTrainer(MinimumRiskTrainingEngine, config)
-
-        mrt_trainer.train(
-            model,
-            None, # We don't need criterion for MRT.
-            optimizer,
-            train_loader=loader.train_iter,
-            valid_loader=loader.valid_iter,
-            src_vocab=loader.src.vocab,
-            tgt_vocab=loader.tgt.vocab,
-            n_epochs=config.rl_n_epochs,
-        )
-
-
 if __name__ == '__main__':
-    config = define_argparser()
+    config = define_argparse()
     main(config)
